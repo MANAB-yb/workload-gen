@@ -82,4 +82,4 @@ public class HotLargeTabletWorkload extends AbstractWorkload {
     log.info("Inserted {} entries into test_table_large_tablet", paramsBatch.size());
     paramsBatch.clear();
   }
-}
+}     

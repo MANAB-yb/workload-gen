@@ -45,9 +45,9 @@ public abstract class AbstractWorkload implements Workload {
   public void runWorkload(WorkloadParams params) {
     this.params = params;
     WorkLoadStats stats = new WorkLoadStats();
-    ExecutorService executor = Executors.newFixedThreadPool(params.getNumThreads());
+    ExecutorService executor = Executors.newFixedThreadPool(getNumThreads());
     Instant workloadStart = Instant.now();
-    for (int i = 0; i < params.getNumThreads(); i++) {
+    for (int i = 0; i < getNumThreads(); i++) {
       executor.submit(() -> workloadThread(stats));
     }
     while(true) {
@@ -84,6 +84,9 @@ public abstract class AbstractWorkload implements Workload {
   abstract void runDdl(boolean clean);
   abstract void loadData();
   abstract void workloadThread(WorkLoadStats stats);
+  int getNumThreads() {
+    return params.getNumThreads();
+  }
 
   public static class WorkLoadStats{
     AtomicBoolean running = new AtomicBoolean(true);
