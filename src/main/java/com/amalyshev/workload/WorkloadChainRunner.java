@@ -4,12 +4,18 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 /**
- * Runs a list of {@link WorkloadStep}s one after another, so a single invocation can reproduce a
- * multi-phase scenario such as CPU pressure followed by connection churn.
+ * Runs each chain's {@link WorkloadStep}s one after another. When several chains are given, they
+ * run at the same time, so a single invocation can put different kinds of load on the cluster
+ * together.
  */
 @Component
 @Slf4j
@@ -21,10 +27,66 @@ public class WorkloadChainRunner {
     this.registry = registry;
   }
 
-  /** Returns a process exit code: 0 when every step completed, 1 when any step failed. */
-  public int run(List<WorkloadStep> steps, boolean continueOnError) {
-    List<Workload> workloads = registry.requireAll(steps);
-    logPlan(steps);
+  /**
+   * Returns a process exit code: 0 when every step of every chain completed, 1 when any step
+   * failed. A failure stops only that chain, unless {@code continueOnError} is set; the other
+   * chains keep running.
+   */
+  public int run(List<List<WorkloadStep>> chains, boolean continueOnError) {
+    List<List<Workload>> resolved = new ArrayList<>(chains.size());
+    for (List<WorkloadStep> chain : chains) {
+      resolved.add(registry.requireAll(chain));
+    }
+    if (chains.size() == 1) {
+      logPlan(chains.get(0), null);
+      return runChain(chains.get(0), resolved.get(0), continueOnError, null);
+    }
+    log.info("Running {} chains in parallel", chains.size());
+    for (int i = 0; i < chains.size(); i++) {
+      logPlan(chains.get(i), (i + 1) + "/" + chains.size());
+    }
+    ExecutorService executor = Executors.newFixedThreadPool(chains.size(), runnable -> {
+      Thread thread = new Thread(runnable);
+      thread.setName("workload-chain");
+      return thread;
+    });
+    try {
+      List<Future<Integer>> futures = new ArrayList<>(chains.size());
+      for (int i = 0; i < chains.size(); i++) {
+        int index = i;
+        String label = (i + 1) + "/" + chains.size();
+        futures.add(executor.submit(() -> {
+          Thread.currentThread().setName("workload-chain-" + (index + 1));
+          MDC.put("chain", "[chain " + label + "] ");
+          try {
+            return runChain(chains.get(index), resolved.get(index), continueOnError, label);
+          } finally {
+            MDC.remove("chain");
+          }
+        }));
+      }
+      int exit = 0;
+      for (Future<Integer> future : futures) {
+        try {
+          exit = Math.max(exit, future.get());
+        } catch (ExecutionException e) {
+          log.error("Chain failed", e.getCause() == null ? e : e.getCause());
+          exit = 1;
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          executor.shutdownNow();
+          return 1;
+        }
+      }
+      return exit;
+    } finally {
+      executor.shutdown();
+    }
+  }
+
+  /** Returns 0 when every step completed, 1 when any step failed. */
+  private int runChain(List<WorkloadStep> steps, List<Workload> workloads, boolean continueOnError,
+      String chainLabel) {
     Instant chainStart = Instant.now();
     List<String> failed = new ArrayList<>();
     for (int i = 0; i < steps.size(); i++) {
@@ -47,17 +109,18 @@ public class WorkloadChainRunner {
       }
     }
     Duration elapsed = Duration.between(chainStart, Instant.now());
+    String which = chainLabel == null ? "Chain" : "Chain " + chainLabel;
     if (failed.isEmpty()) {
-      log.info("Chain complete: {} step(s) in {}", steps.size(), Durations.format(elapsed));
+      log.info("{} complete: {} step(s) in {}", which, steps.size(), Durations.format(elapsed));
       return 0;
     }
-    log.error("Chain finished with {} failed step(s) [{}] after {}", failed.size(),
+    log.error("{} finished with {} failed step(s) [{}] after {}", which, failed.size(),
         String.join(", ", failed), Durations.format(elapsed));
     return 1;
   }
 
-  private void logPlan(List<WorkloadStep> steps) {
-    StringBuilder plan = new StringBuilder("Workload chain: ")
+  private void logPlan(List<WorkloadStep> steps, String chainLabel) {
+    StringBuilder plan = new StringBuilder(chainLabel == null ? "Workload chain: " : "Chain " + chainLabel + ": ")
         .append(steps.size()).append(" step(s), ")
         .append(Durations.format(WorkloadCli.totalDuration(steps)))
         .append(" of workload time (DDL and data loading are additional)");

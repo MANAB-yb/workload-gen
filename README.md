@@ -106,8 +106,11 @@ does not override. Step options are `threads`, `duration`, `cpu-amplification` (
 and `no-load`.
 
 ```bash
-# Comma-separated shorthand
+# Comma-separated shorthand. Steps inside one --chain run in order.
 ./workload-gen.sh -H node1 -W secret --chain cpu-heavy:20m,connection-churn:30m
+
+# Repeat --chain to run several chains at the same time. A workload can belong to only one of them.
+./workload-gen.sh -H node1 -W secret --chain cpu-heavy:20m --chain connection-churn:30m
 
 # One --step per phase, with per-step overrides
 ./workload-gen.sh -H node1 -W secret \

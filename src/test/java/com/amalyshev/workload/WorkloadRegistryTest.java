@@ -43,6 +43,18 @@ class WorkloadRegistryTest {
   }
 
   @Test
+  void rejectsAWorkloadSharedByParallelChains() {
+    WorkloadParams params = new WorkloadParams();
+    assertThatThrownBy(() -> WorkloadRegistry.requireDistinct(List.of(
+        List.of(new WorkloadStep("cpu-heavy", params), new WorkloadStep("connection-churn", params)),
+        List.of(new WorkloadStep("cpu_heavy", params)))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("cpu_heavy")
+        .hasMessageContaining("chain 1")
+        .hasMessageContaining("chain 2");
+  }
+
+  @Test
   void checksChainStepNamesBeforeAnythingConnects() {
     WorkloadParams params = new WorkloadParams();
     WorkloadRegistry.requireKnown(List.of(new WorkloadStep("cpu-heavy", params)));

@@ -65,6 +65,27 @@ public class WorkloadRegistry {
   }
 
   /**
+   * Parallel chains share one instance of each workload, and that instance holds the parameters
+   * of the run currently in progress. The same workload in two chains would overwrite those
+   * parameters, so reject the overlap before anything starts.
+   */
+  public static void requireDistinct(List<List<WorkloadStep>> chains) {
+    Map<String, Integer> owner = new LinkedHashMap<>();
+    for (int i = 0; i < chains.size(); i++) {
+      for (WorkloadStep step : chains.get(i)) {
+        String name = normalize(step.workload());
+        Integer previous = owner.putIfAbsent(name, i);
+        if (previous != null && previous != i) {
+          throw new IllegalArgumentException("Workload '" + step.workload()
+              + "' is used in chain " + (previous + 1) + " and chain " + (i + 1)
+              + ". Parallel chains share one instance of each workload, so a workload can "
+              + "belong to only one chain.");
+        }
+      }
+    }
+  }
+
+  /**
    * Lists the workload names by scanning the classpath instead of by starting a context, so
    * {@code --list-workloads} works without a reachable cluster. Spring Data JDBC resolves its
    * dialect over a live connection during startup, so a context alone would need a database.

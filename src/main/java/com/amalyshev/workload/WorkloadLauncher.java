@@ -2,6 +2,7 @@ package com.amalyshev.workload;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.context.ConfigurableApplicationContext;
@@ -24,17 +25,21 @@ final class WorkloadLauncher {
     if (cli.selection.listWorkloads) {
       return listWorkloads();
     }
-    List<WorkloadStep> steps = cli.steps();
+    List<List<WorkloadStep>> chains = cli.chains();
     // Check the names against a classpath scan first. Resolving them from the context would
     // require a reachable cluster, so a typo would be reported as a connection failure.
-    WorkloadRegistry.requireKnown(steps);
-    Map<String, Object> properties = cli.springProperties(steps);
+    WorkloadRegistry.requireKnown(
+        chains.stream().flatMap(List::stream).collect(Collectors.toList()));
+    if (chains.size() > 1) {
+      WorkloadRegistry.requireDistinct(chains);
+    }
+    Map<String, Object> properties = cli.springProperties(chains);
     if (cli.selection.dryRun) {
-      return dryRun(cli, steps, properties);
+      return dryRun(chains, properties);
     }
     try (ConfigurableApplicationContext context = start(cli, properties)) {
       return context.getBean(WorkloadChainRunner.class)
-          .run(steps, cli.selection.continueOnError);
+          .run(chains, cli.selection.continueOnError);
     }
   }
 
@@ -70,17 +75,27 @@ final class WorkloadLauncher {
     return 0;
   }
 
-  private static int dryRun(WorkloadCli cli, List<WorkloadStep> steps,
-      Map<String, Object> properties) {
+  private static int dryRun(List<List<WorkloadStep>> chains, Map<String, Object> properties) {
     System.out.println("Connection:");
     properties.forEach((key, value) -> System.out.println("  " + key + " = "
         + (key.endsWith("password") ? mask(String.valueOf(value)) : value)));
-    System.out.println("Chain (" + steps.size() + " step(s), "
+    if (chains.size() == 1) {
+      printChain("Chain", chains.get(0));
+      return 0;
+    }
+    System.out.println(chains.size() + " chains, running in parallel:");
+    for (int i = 0; i < chains.size(); i++) {
+      printChain("Chain " + (i + 1), chains.get(i));
+    }
+    return 0;
+  }
+
+  private static void printChain(String label, List<WorkloadStep> steps) {
+    System.out.println(label + " (" + steps.size() + " step(s), "
         + Durations.format(WorkloadCli.totalDuration(steps)) + " total):");
     for (int i = 0; i < steps.size(); i++) {
       System.out.println("  " + (i + 1) + ". " + steps.get(i));
     }
-    return 0;
   }
 
   private static String mask(String password) {

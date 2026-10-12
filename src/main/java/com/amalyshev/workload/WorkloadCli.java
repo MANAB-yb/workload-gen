@@ -13,8 +13,9 @@ import picocli.CommandLine.Option;
 import picocli.CommandLine.Unmatched;
 
 /**
- * Command-line entry point: turns flags into cluster connection settings and into a list of
- * {@link WorkloadStep}s to run in sequence.
+ * Command-line entry point: turns flags into cluster connection settings and into one or more
+ * workload chains. Steps inside a chain run in sequence; repeating {@code --chain} runs those
+ * chains at the same time.
  *
  * <p>Connection settings are translated into {@code spring.datasource.*} properties before the
  * Spring context starts (see {@link WorkloadLauncher}), because the DataSource is built during
@@ -41,6 +42,7 @@ import picocli.CommandLine.Unmatched;
         "Examples:",
         "  workload-gen -H 10.9.143.38,10.9.199.206 -W secret -w cpu-heavy -t 20m",
         "  workload-gen -H node1 -W secret --chain cpu-heavy:20m,connection-churn:30m",
+        "  workload-gen -H node1 -W secret --chain cpu-heavy:20m --chain connection-churn:30m",
         "  workload-gen -H node1 --step cpu-heavy:20m --step 'basic-read-write:30m:threads=64,no-load'",
         "  workload-gen --list-workloads",
         ""})
@@ -115,8 +117,8 @@ public class WorkloadCli implements Callable<Integer> {
     DriverChoice driver = DriverChoice.POSTGRESQL;
 
     @Option(names = "--pool-size", paramLabel = "<n>",
-        description = "Hikari maximum pool size. Defaults to the largest step's thread count "
-            + "plus headroom.")
+        description = "Hikari maximum pool size. Defaults to the sum of each chain's widest "
+            + "step, plus headroom.")
     Integer poolSize;
 
     @Option(names = "--ssl-mode", paramLabel = "<mode>",
@@ -203,7 +205,8 @@ public class WorkloadCli implements Callable<Integer> {
     List<String> steps = new ArrayList<>();
 
     @Option(names = "--chain", paramLabel = "<step,step,...>",
-        description = "Comma-separated shorthand for a sequence of --step values.")
+        description = "Comma-separated chain. Repeat to run several chains at the same time; "
+            + "steps inside one --chain still run in order.")
     List<String> chain = new ArrayList<>();
 
     @Option(names = "--chain-file", paramLabel = "<path>",
@@ -261,10 +264,36 @@ public class WorkloadCli implements Callable<Integer> {
   }
 
   /**
-   * Resolves the chain from {@code --step}, {@code --chain}, {@code --chain-file} and
+   * Resolves every chain to run. One {@code --chain} is merged with {@code --step} and
+   * {@code --chain-file} into a single sequence. Each additional {@code --chain} is its own
+   * chain, and those chains run in parallel.
+   */
+  List<List<WorkloadStep>> chains() {
+    if (selection.chain.size() <= 1) {
+      return List.of(steps());
+    }
+    if (!selection.steps.isEmpty() || selection.chainFile != null || selection.workload != null) {
+      throw new IllegalArgumentException(
+          "Repeated --chain runs each chain in parallel and cannot be combined with --workload, "
+              + "--step, or --chain-file. Put those steps inside one of the --chain values.");
+    }
+    WorkloadParams defaults = defaultParams();
+    List<List<WorkloadStep>> chains = new ArrayList<>();
+    for (String chain : selection.chain) {
+      chains.add(WorkloadStepParser.parseAll(WorkloadStepParser.splitChain(chain), defaults));
+    }
+    return chains;
+  }
+
+  /**
+   * Resolves the single chain from {@code --step}, {@code --chain}, {@code --chain-file} and
    * {@code --workload}, in that order of precedence.
    */
   List<WorkloadStep> steps() {
+    if (selection.chain.size() > 1) {
+      throw new IllegalArgumentException(
+          "More than one --chain was given. Each --chain runs in parallel; read them with chains().");
+    }
     WorkloadParams defaults = defaultParams();
     List<String> specs = new ArrayList<>();
     specs.addAll(selection.steps);
@@ -303,13 +332,13 @@ public class WorkloadCli implements Callable<Integer> {
    * The {@code spring.datasource.*} properties this invocation implies. Applied above
    * application.properties but below explicit {@code --spring.*} arguments.
    */
-  Map<String, Object> springProperties(List<WorkloadStep> steps) {
+  Map<String, Object> springProperties(List<List<WorkloadStep>> chains) {
     Map<String, Object> properties = new LinkedHashMap<>();
     properties.put("spring.datasource.url", jdbcUrl());
     properties.put("spring.datasource.driverClassName", cluster.driver.driverClass());
     properties.put("spring.datasource.username", cluster.username);
     properties.put("spring.datasource.password", resolvedPassword());
-    properties.put("spring.datasource.hikari.maximumPoolSize", poolSize(steps));
+    properties.put("spring.datasource.hikari.maximumPoolSize", poolSize(chains));
     properties.put("spring.datasource.hikari.data-source-properties.options",
         "-c statement_timeout=" + Durations.parse(cluster.statementTimeout).toMillis());
     cluster.dataSourceProperties.forEach((key, value) ->
@@ -378,16 +407,19 @@ public class WorkloadCli implements Callable<Integer> {
   }
 
   /**
-   * Sizes the pool for the widest step, since a pool smaller than the thread count turns the
-   * workload into a queue on the client instead of load on the cluster.
+   * Sizes the pool for every chain's widest step added together. Chains run at the same time, so
+   * a pool sized for only the single widest step would queue the others on the client.
    */
-  int poolSize(List<WorkloadStep> steps) {
+  int poolSize(List<List<WorkloadStep>> chains) {
     if (cluster.poolSize != null) {
       return cluster.poolSize;
     }
-    int widest = steps.stream().mapToInt(step -> step.params().getNumThreads()).max().orElse(
-        WorkloadParams.DEFAULT_NUM_THREADS);
-    // Headroom for the DDL/load connection and the periodic progress queries.
-    return Math.max(10, widest + 4);
+    int concurrent = 0;
+    for (List<WorkloadStep> steps : chains) {
+      concurrent += steps.stream().mapToInt(step -> step.params().getNumThreads()).max().orElse(
+          WorkloadParams.DEFAULT_NUM_THREADS);
+    }
+    // Headroom per chain for its DDL/load connection and the periodic progress queries.
+    return Math.max(10, concurrent + 4 * chains.size());
   }
 }

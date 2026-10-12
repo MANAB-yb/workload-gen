@@ -51,7 +51,7 @@ class WorkloadCliTest {
   void translatesConnectionOptionsIntoSpringProperties() {
     WorkloadCli cli = parse("-H", "node1", "-U", "admin", "-W", "secret", "--driver", "yugabytedb",
         "--statement-timeout", "90s", "-o", "reWriteBatchedInserts=false", "-w", "cpu-heavy");
-    Map<String, Object> properties = cli.springProperties(cli.steps());
+    Map<String, Object> properties = cli.springProperties(cli.chains());
     assertThat(properties)
         .containsEntry("spring.datasource.username", "admin")
         .containsEntry("spring.datasource.password", "secret")
@@ -65,9 +65,12 @@ class WorkloadCliTest {
   @Test
   void sizesThePoolForTheWidestStepUnlessItIsGivenExplicitly() {
     WorkloadCli cli = parse("--step", "cpu-heavy:1m:threads=64", "--step", "connection-churn:1m");
-    assertThat(cli.poolSize(cli.steps())).isEqualTo(68);
+    assertThat(cli.poolSize(cli.chains())).isEqualTo(68);
     WorkloadCli explicit = parse("--pool-size", "12", "-w", "cpu-heavy", "-n", "64");
-    assertThat(explicit.poolSize(explicit.steps())).isEqualTo(12);
+    assertThat(explicit.poolSize(explicit.chains())).isEqualTo(12);
+    WorkloadCli parallel = parse("--chain", "cpu-heavy:1m:threads=64",
+        "--chain", "connection-churn:1m:threads=10");
+    assertThat(parallel.poolSize(parallel.chains())).isEqualTo(82);
   }
 
   @Test
@@ -79,6 +82,29 @@ class WorkloadCliTest {
         .containsExactly("cpu-heavy", "connection-churn", "basic-read-write");
     assertThat(steps).extracting(step -> step.params().getNumThreads()).containsExactly(20, 20, 3);
     assertThat(WorkloadCli.totalDuration(steps)).isEqualTo(Duration.ofMinutes(51));
+  }
+
+  @Test
+  void keepsRepeatedChainsSeparateSoTheyCanRunTogether() {
+    WorkloadCli cli = parse("-n", "20", "--chain", "cpu-heavy:20m,connection-churn:30m",
+        "--chain", "basic-read-write:1m:threads=3");
+    List<List<WorkloadStep>> chains = cli.chains();
+    assertThat(chains).hasSize(2);
+    assertThat(chains.get(0)).extracting(WorkloadStep::workload)
+        .containsExactly("cpu-heavy", "connection-churn");
+    assertThat(chains.get(0)).extracting(step -> step.params().getNumThreads())
+        .containsExactly(20, 20);
+    assertThat(chains.get(1)).extracting(WorkloadStep::workload)
+        .containsExactly("basic-read-write");
+    assertThat(chains.get(1).get(0).params().getNumThreads()).isEqualTo(3);
+  }
+
+  @Test
+  void refusesToMixRepeatedChainsWithASingleChainSelection() {
+    assertThatThrownBy(() -> parse("--step", "cpu-heavy:1m", "--chain", "a:1m", "--chain", "b:1m")
+        .chains())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("cannot be combined");
   }
 
   @Test

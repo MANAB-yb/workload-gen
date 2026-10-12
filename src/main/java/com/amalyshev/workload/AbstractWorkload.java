@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
 @Slf4j
@@ -46,9 +47,19 @@ public abstract class AbstractWorkload implements Workload {
     this.params = params;
     WorkLoadStats stats = new WorkLoadStats();
     ExecutorService executor = Executors.newFixedThreadPool(getNumThreads());
+    Map<String, String> chainContext = MDC.getCopyOfContextMap();
     Instant workloadStart = Instant.now();
     for (int i = 0; i < getNumThreads(); i++) {
-      executor.submit(() -> workloadThread(stats));
+      executor.submit(() -> {
+        if (chainContext != null) {
+          MDC.setContextMap(chainContext);
+        }
+        try {
+          workloadThread(stats);
+        } finally {
+          MDC.clear();
+        }
+      });
     }
     while(true) {
       if (workloadStart.plus(params.getDuration()).isBefore(Instant.now())) {
