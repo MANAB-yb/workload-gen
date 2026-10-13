@@ -22,9 +22,11 @@ import org.springframework.stereotype.Component;
 public class WorkloadChainRunner {
 
   private final WorkloadRegistry registry;
+  private final ChainDatabases databases;
 
-  public WorkloadChainRunner(WorkloadRegistry registry) {
+  public WorkloadChainRunner(WorkloadRegistry registry, ChainDatabases databases) {
     this.registry = registry;
+    this.databases = databases;
   }
 
   /**
@@ -38,12 +40,12 @@ public class WorkloadChainRunner {
       resolved.add(registry.requireAll(chain));
     }
     if (chains.size() == 1) {
-      logPlan(chains.get(0), null);
-      return runChain(chains.get(0), resolved.get(0), continueOnError, null);
+      logPlan(chains.get(0), null, databases.nameFor(0));
+      return runChain(chains.get(0), resolved.get(0), continueOnError, null, 0);
     }
     log.info("Running {} chains in parallel", chains.size());
     for (int i = 0; i < chains.size(); i++) {
-      logPlan(chains.get(i), (i + 1) + "/" + chains.size());
+      logPlan(chains.get(i), (i + 1) + "/" + chains.size(), databases.nameFor(i));
     }
     ExecutorService executor = Executors.newFixedThreadPool(chains.size(), runnable -> {
       Thread thread = new Thread(runnable);
@@ -55,11 +57,14 @@ public class WorkloadChainRunner {
       for (int i = 0; i < chains.size(); i++) {
         int index = i;
         String label = (i + 1) + "/" + chains.size();
+        String database = databases.nameFor(index);
         futures.add(executor.submit(() -> {
           Thread.currentThread().setName("workload-chain-" + (index + 1));
-          MDC.put("chain", "[chain " + label + "] ");
+          MDC.put("chain", database == null
+              ? "[chain " + label + "] "
+              : "[chain " + label + " " + database + "] ");
           try {
-            return runChain(chains.get(index), resolved.get(index), continueOnError, label);
+            return runChain(chains.get(index), resolved.get(index), continueOnError, label, index);
           } finally {
             MDC.remove("chain");
           }
@@ -86,7 +91,22 @@ public class WorkloadChainRunner {
 
   /** Returns 0 when every step completed, 1 when any step failed. */
   private int runChain(List<WorkloadStep> steps, List<Workload> workloads, boolean continueOnError,
-      String chainLabel) {
+      String chainLabel, int chainIndex) {
+    String url = databases.urlFor(chainIndex);
+    if (url != null) {
+      ChainDatabase.use(url);
+    }
+    try {
+      return runChainSteps(steps, workloads, continueOnError, chainLabel);
+    } finally {
+      if (url != null) {
+        ChainDatabase.clear();
+      }
+    }
+  }
+
+  private int runChainSteps(List<WorkloadStep> steps, List<Workload> workloads,
+      boolean continueOnError, String chainLabel) {
     Instant chainStart = Instant.now();
     List<String> failed = new ArrayList<>();
     for (int i = 0; i < steps.size(); i++) {
@@ -119,11 +139,15 @@ public class WorkloadChainRunner {
     return 1;
   }
 
-  private void logPlan(List<WorkloadStep> steps, String chainLabel) {
+  private void logPlan(List<WorkloadStep> steps, String chainLabel, String database) {
     StringBuilder plan = new StringBuilder(chainLabel == null ? "Workload chain: " : "Chain " + chainLabel + ": ")
         .append(steps.size()).append(" step(s), ")
         .append(Durations.format(WorkloadCli.totalDuration(steps)))
-        .append(" of workload time (DDL and data loading are additional)");
+        .append(" of workload time");
+    if (database != null) {
+      plan.append(" on database ").append(database);
+    }
+    plan.append(" (DDL and data loading are additional)");
     for (int i = 0; i < steps.size(); i++) {
       plan.append(System.lineSeparator()).append("  ").append(i + 1).append(". ").append(steps.get(i));
     }

@@ -43,6 +43,8 @@ import picocli.CommandLine.Unmatched;
         "  workload-gen -H 10.9.143.38,10.9.199.206 -W secret -w cpu-heavy -t 20m",
         "  workload-gen -H node1 -W secret --chain cpu-heavy:20m,connection-churn:30m",
         "  workload-gen -H node1 -W secret --chain cpu-heavy:20m --chain connection-churn:30m",
+        "  workload-gen -H node1 -W secret -d db_catalog,db_churn \\",
+        "      --chain high-catelog-reads:20m --chain connection-churn:20m",
         "  workload-gen -H node1 --step cpu-heavy:20m --step 'basic-read-write:30m:threads=64,no-load'",
         "  workload-gen --list-workloads",
         ""})
@@ -95,9 +97,10 @@ public class WorkloadCli implements Callable<Integer> {
         description = "Port for hosts given without one. Default: ${DEFAULT-VALUE}")
     int port = 5433;
 
-    @Option(names = {"-d", "--database"}, paramLabel = "<name>",
-        description = "Database name. Default: ${DEFAULT-VALUE}")
-    String database = "yugabyte";
+    @Option(names = {"-d", "--database"}, split = ",", paramLabel = "<name>",
+        description = "Database name, repeatable or comma-separated. One name is used for every "
+            + "chain. One name per chain runs each chain in that database. Default: yugabyte")
+    List<String> databases = new ArrayList<>(List.of("yugabyte"));
 
     @Option(names = {"-U", "--user", "--username"}, paramLabel = "<user>",
         description = "Database user. Default: ${DEFAULT-VALUE}")
@@ -117,8 +120,9 @@ public class WorkloadCli implements Callable<Integer> {
     DriverChoice driver = DriverChoice.POSTGRESQL;
 
     @Option(names = "--pool-size", paramLabel = "<n>",
-        description = "Hikari maximum pool size. Defaults to the sum of each chain's widest "
-            + "step, plus headroom.")
+        description = "Hikari maximum pool size. Defaults to the threads a chain needs plus "
+            + "headroom. One database shares a pool sized for every chain; one database per "
+            + "chain gives each database its own pool. An explicit size is applied to each pool.")
     Integer poolSize;
 
     @Option(names = "--ssl-mode", paramLabel = "<mode>",
@@ -329,26 +333,65 @@ public class WorkloadCli implements Callable<Integer> {
   }
 
   /**
+   * Database each chain connects to, in chain order. A single {@code --database} is shared.
+   * Several names must line up one-to-one with the chains.
+   */
+  List<String> databasesFor(List<List<WorkloadStep>> chains) {
+    List<String> names = databaseNames();
+    if (names.stream().distinct().count() == 1) {
+      return chains.stream().map(chain -> names.get(0)).toList();
+    }
+    if (names.size() != chains.size()) {
+      throw new IllegalArgumentException("Got " + names.size() + " databases and " + chains.size()
+          + " chain(s). Pass one --database to use it for every chain, or one database per chain.");
+    }
+    return names;
+  }
+
+  /**
    * The {@code spring.datasource.*} properties this invocation implies. Applied above
    * application.properties but below explicit {@code --spring.*} arguments.
+   *
+   * <p>One database keeps a single pool. Several databases add one
+   * {@code workload.database[n]} entry per chain so each chain can connect on its own.
    */
   Map<String, Object> springProperties(List<List<WorkloadStep>> chains) {
+    List<String> databases = databasesFor(chains);
+    boolean perChain = databaseNames().stream().distinct().count() > 1;
     Map<String, Object> properties = new LinkedHashMap<>();
-    properties.put("spring.datasource.url", jdbcUrl());
+    properties.put("spring.datasource.url", jdbcUrl(databases.get(0)));
     properties.put("spring.datasource.driverClassName", cluster.driver.driverClass());
     properties.put("spring.datasource.username", cluster.username);
     properties.put("spring.datasource.password", resolvedPassword());
-    properties.put("spring.datasource.hikari.maximumPoolSize", poolSize(chains));
+    properties.put("spring.datasource.hikari.maximumPoolSize",
+        perChain ? poolSizeForChain(chains.get(0)) : poolSize(chains));
     properties.put("spring.datasource.hikari.data-source-properties.options",
         "-c statement_timeout=" + Durations.parse(cluster.statementTimeout).toMillis());
     cluster.dataSourceProperties.forEach((key, value) ->
         properties.put("spring.datasource.hikari.data-source-properties." + key, value));
+    if (perChain) {
+      properties.put("workload.multi-database", "true");
+      for (int i = 0; i < databases.size(); i++) {
+        properties.put("workload.database[" + i + "].name", databases.get(i));
+        properties.put("workload.database[" + i + "].url", jdbcUrl(databases.get(i)));
+        properties.put("workload.database[" + i + "].pool-size", poolSizeForChain(chains.get(i)));
+      }
+    }
     return properties;
   }
 
-  /** Composes the JDBC URL from the host/port/database and SSL options, unless --url was given. */
+  /** Composes the JDBC URL for the first database, unless --url was given. */
   String jdbcUrl() {
+    return jdbcUrl(databaseNames().get(0));
+  }
+
+  /** Composes the JDBC URL for one database from the host/port and SSL options, unless --url was given. */
+  String jdbcUrl(String database) {
     if (cluster.url != null && !cluster.url.isBlank()) {
+      if (databaseNames().stream().distinct().count() > 1) {
+        throw new IllegalArgumentException(
+            "--url cannot be combined with more than one --database");
+      }
       return cluster.url.trim();
     }
     if (cluster.hosts.isEmpty()) {
@@ -361,7 +404,7 @@ public class WorkloadCli implements Callable<Integer> {
       }
       url.append(withPort(cluster.hosts.get(i).trim()));
     }
-    url.append('/').append(cluster.database);
+    url.append('/').append(database);
     List<String> query = new ArrayList<>();
     if (cluster.sslMode != null) {
       query.add("sslmode=" + cluster.sslMode);
@@ -380,6 +423,17 @@ public class WorkloadCli implements Callable<Integer> {
       url.append('?').append(String.join("&", query));
     }
     return url.toString();
+  }
+
+  private List<String> databaseNames() {
+    List<String> names = cluster.databases.stream()
+        .map(String::trim)
+        .filter(name -> !name.isEmpty())
+        .toList();
+    if (names.isEmpty()) {
+      throw new IllegalArgumentException("At least one --database is required");
+    }
+    return names;
   }
 
   private String withPort(String host) {
@@ -421,5 +475,15 @@ public class WorkloadCli implements Callable<Integer> {
     }
     // Headroom per chain for its DDL/load connection and the periodic progress queries.
     return Math.max(10, concurrent + 4 * chains.size());
+  }
+
+  /** Pool for one chain when each chain has its own database. */
+  private int poolSizeForChain(List<WorkloadStep> steps) {
+    if (cluster.poolSize != null) {
+      return cluster.poolSize;
+    }
+    int widest = steps.stream().mapToInt(step -> step.params().getNumThreads()).max().orElse(
+        WorkloadParams.DEFAULT_NUM_THREADS);
+    return Math.max(10, widest + 4);
   }
 }

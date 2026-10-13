@@ -60,7 +60,7 @@ immediately. `cpu_heavy` and `CpuHeavyWorkload` resolve to `cpu-heavy` as well.
 | --- | --- |
 | `-H, --host <host[:port]>` | Cluster host(s), repeatable or comma-separated. Default `127.0.0.1`. |
 | `-p, --port <port>` | Port for hosts given without one. Default `5433`. |
-| `-d, --database <name>` | Database name. Default `yugabyte`. |
+| `-d, --database <name>` | Database name, repeatable or comma-separated. One name is used for every chain. One name per chain runs each chain in that database. Default `yugabyte`. |
 | `-U, --user <user>` | Database user. Default `yugabyte`. |
 | `-W, --password [<pw>]` | Password. Pass `-W` with no value to be prompted, or set `WORKLOAD_DB_PASSWORD` / `PGPASSWORD`. |
 | `--url <jdbcUrl>` | Full JDBC URL; overrides host/port/database and the SSL options. |
@@ -111,6 +111,10 @@ and `no-load`.
 
 # Repeat --chain to run several chains at the same time. A workload can belong to only one of them.
 ./workload-gen.sh -H node1 -W secret --chain cpu-heavy:20m --chain connection-churn:30m
+
+# One database per chain. A single -d is shared by every chain.
+./workload-gen.sh -H node1 -W secret -d db_catalog,db_churn \
+  --chain high-catelog-reads:20m --chain connection-churn:20m
 
 # One --step per phase, with per-step overrides
 ./workload-gen.sh -H node1 -W secret \

@@ -55,7 +55,7 @@ public class ConnectionChurnWorkload extends AbstractWorkload {
     Random rnd = new Random();
     Instant lastErrorLog = null;
     while (stats.running.get()) {
-      try (Connection conn = DriverManager.getConnection(jdbcUrl, username, password)) {
+      try (Connection conn = DriverManager.getConnection(currentJdbcUrl(), username, password)) {
         int id = rnd.nextInt(TABLE_SIZE);
 
         try (PreparedStatement insert = conn.prepareStatement(
@@ -84,5 +84,11 @@ public class ConnectionChurnWorkload extends AbstractWorkload {
         stats.incFailed();
       }
     }
+  }
+
+  /** The chain's database when several were named, otherwise the datasource this bean was built with. */
+  private String currentJdbcUrl() {
+    String routed = ChainDatabase.currentUrl();
+    return routed != null ? routed : jdbcUrl;
   }
 }

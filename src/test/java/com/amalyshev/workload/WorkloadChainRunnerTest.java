@@ -6,9 +6,24 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class WorkloadChainRunnerTest {
+
+  @Test
+  void workloadThreadsSeeTheChainDatabase() throws Exception {
+    ChainDatabase.use("jdbc:postgresql://node1:5433/db_catalog");
+    AtomicReference<String> seen = new AtomicReference<>();
+    try {
+      Thread child = new Thread(() -> seen.set(ChainDatabase.currentUrl()));
+      child.start();
+      child.join(5_000);
+      assertThat(seen).hasValue("jdbc:postgresql://node1:5433/db_catalog");
+    } finally {
+      ChainDatabase.clear();
+    }
+  }
 
   @Test
   void runsRepeatedChainsAtTheSameTime() throws Exception {
@@ -19,7 +34,8 @@ class WorkloadChainRunnerTest {
     BetaWorkload.entered = entered;
     BetaWorkload.release = release;
     WorkloadChainRunner runner = new WorkloadChainRunner(
-        new WorkloadRegistry(List.of(new AlphaWorkload(), new BetaWorkload())));
+        new WorkloadRegistry(List.of(new AlphaWorkload(), new BetaWorkload())),
+        ChainDatabases.none());
     WorkloadParams params = new WorkloadParams();
     Thread run = new Thread(() -> runner.run(List.of(
         List.of(new WorkloadStep("alpha", params)),
@@ -42,7 +58,8 @@ class WorkloadChainRunnerTest {
     AlphaWorkload.release = new CountDownLatch(0);
     BetaWorkload.release = new CountDownLatch(0);
     WorkloadChainRunner runner = new WorkloadChainRunner(
-        new WorkloadRegistry(List.of(new AlphaWorkload(), new BetaWorkload())));
+        new WorkloadRegistry(List.of(new AlphaWorkload(), new BetaWorkload())),
+        ChainDatabases.none());
     int exit = runner.run(List.of(List.of(
         new WorkloadStep("alpha", new WorkloadParams()),
         new WorkloadStep("beta", new WorkloadParams()))), false);
@@ -56,7 +73,8 @@ class WorkloadChainRunnerTest {
     BetaWorkload.entered = new CountDownLatch(1);
     BetaWorkload.release = new CountDownLatch(0);
     WorkloadChainRunner runner = new WorkloadChainRunner(
-        new WorkloadRegistry(List.of(new FailingWorkload(), new BetaWorkload())));
+        new WorkloadRegistry(List.of(new FailingWorkload(), new BetaWorkload())),
+        ChainDatabases.none());
     int exit = runner.run(List.of(
         List.of(new WorkloadStep("failing", new WorkloadParams())),
         List.of(new WorkloadStep("beta", new WorkloadParams()))), false);

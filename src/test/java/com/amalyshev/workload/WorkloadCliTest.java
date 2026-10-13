@@ -100,6 +100,48 @@ class WorkloadCliTest {
   }
 
   @Test
+  void usesOneDatabaseForEveryChain() {
+    WorkloadCli cli = parse("-d", "qbet", "--chain", "cpu-heavy:1m", "--chain", "connection-churn:1m");
+    assertThat(cli.databasesFor(cli.chains())).containsExactly("qbet", "qbet");
+    assertThat(cli.springProperties(cli.chains()))
+        .containsEntry("spring.datasource.url", "jdbc:postgresql://127.0.0.1:5433/qbet")
+        .doesNotContainKey("workload.multi-database");
+  }
+
+  @Test
+  void assignsEachChainItsOwnDatabase() {
+    WorkloadCli cli = parse("-H", "node1", "-d", "db_catalog,db_churn",
+        "--chain", "cpu-heavy:1m:threads=64", "--chain", "connection-churn:1m:threads=10");
+    assertThat(cli.databasesFor(cli.chains())).containsExactly("db_catalog", "db_churn");
+    assertThat(cli.springProperties(cli.chains()))
+        .containsEntry("workload.multi-database", "true")
+        .containsEntry("workload.database[0].name", "db_catalog")
+        .containsEntry("workload.database[1].name", "db_churn")
+        .containsEntry("workload.database[0].url", "jdbc:postgresql://node1:5433/db_catalog")
+        .containsEntry("workload.database[1].url", "jdbc:postgresql://node1:5433/db_churn")
+        .containsEntry("workload.database[0].pool-size", 68)
+        .containsEntry("workload.database[1].pool-size", 14)
+        .containsEntry("spring.datasource.url", "jdbc:postgresql://node1:5433/db_catalog");
+    WorkloadCli repeated = parse("-d", "db_catalog", "-d", "db_churn",
+        "--chain", "cpu-heavy:1m", "--chain", "connection-churn:1m");
+    assertThat(repeated.databasesFor(repeated.chains())).containsExactly("db_catalog", "db_churn");
+  }
+
+  @Test
+  void rejectsADatabaseCountThatDoesNotMatchTheChains() {
+    WorkloadCli cli = parse("-d", "a,b,c", "--chain", "cpu-heavy:1m", "--chain", "connection-churn:1m");
+    assertThatThrownBy(() -> cli.databasesFor(cli.chains()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("3 databases")
+        .hasMessageContaining("2 chain");
+    WorkloadCli withUrl = parse("--url", "jdbc:postgresql://host/db", "-d", "a,b",
+        "--chain", "cpu-heavy:1m", "--chain", "connection-churn:1m");
+    assertThatThrownBy(() -> withUrl.springProperties(withUrl.chains()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("--url");
+  }
+
+  @Test
   void refusesToMixRepeatedChainsWithASingleChainSelection() {
     assertThatThrownBy(() -> parse("--step", "cpu-heavy:1m", "--chain", "a:1m", "--chain", "b:1m")
         .chains())

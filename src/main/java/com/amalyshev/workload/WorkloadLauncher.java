@@ -35,7 +35,7 @@ final class WorkloadLauncher {
     }
     Map<String, Object> properties = cli.springProperties(chains);
     if (cli.selection.dryRun) {
-      return dryRun(chains, properties);
+      return dryRun(cli, chains, properties);
     }
     try (ConfigurableApplicationContext context = start(cli, properties)) {
       return context.getBean(WorkloadChainRunner.class)
@@ -75,17 +75,19 @@ final class WorkloadLauncher {
     return 0;
   }
 
-  private static int dryRun(List<List<WorkloadStep>> chains, Map<String, Object> properties) {
+  private static int dryRun(WorkloadCli cli, List<List<WorkloadStep>> chains,
+      Map<String, Object> properties) {
     System.out.println("Connection:");
     properties.forEach((key, value) -> System.out.println("  " + key + " = "
         + (key.endsWith("password") ? mask(String.valueOf(value)) : value)));
+    List<String> databases = cli.databasesFor(chains);
     if (chains.size() == 1) {
-      printChain("Chain", chains.get(0));
+      printChain("Chain [" + databases.get(0) + "]", chains.get(0));
       return 0;
     }
     System.out.println(chains.size() + " chains, running in parallel:");
     for (int i = 0; i < chains.size(); i++) {
-      printChain("Chain " + (i + 1), chains.get(i));
+      printChain("Chain " + (i + 1) + " [" + databases.get(i) + "]", chains.get(i));
     }
     return 0;
   }
