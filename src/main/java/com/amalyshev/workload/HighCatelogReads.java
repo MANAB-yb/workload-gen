@@ -74,6 +74,6 @@ public class HighCatelogReads extends AbstractWorkload {
     @Override
     int getNumThreads() {
         // at least 1000 threads to produce enough load for raising anomaly
-        return Math.max(params.getNumThreads(), 1000); 
+        return Math.max(params.getNumThreads(), 500); 
     }
 }
